@@ -1,7 +1,8 @@
 import bcrypt from 'bcrypt';
 
-// A tiny one-off script. Run it once to turn your chosen admin password
-// into a hash you paste into .env — you never store the real password.
+// Run once to turn your chosen admin password into a hash you paste into
+// .env. You never store the real password anywhere, only this hash.
+//
 // Usage: node scripts/hash-password.js "your-chosen-password"
 
 const password = process.argv[2];

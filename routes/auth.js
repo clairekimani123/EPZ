@@ -3,36 +3,37 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
 // --------------------------------------------------------------------------
-// A single hard-coded admin account, defined via .env, not a database table.
-// This is intentionally minimal for now — fine for "one staff team sharing
-// one login." If you later need individual staff accounts with different
-// permissions, that's when you'd add a real `staff_users` table. Don't
-// build that until you actually need it.
+// Back to a single shared admin credential, defined via .env. Whoever knows
+// the email + password gets into the dashboard - no per-person accounts,
+// no registration endpoint. Simpler, and the right call for a small team
+// where you don't need to know WHO made a change, just that a logged-in
+// staff member did.
 // --------------------------------------------------------------------------
 
 const router = Router();
 
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { email, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required.' });
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' });
   }
 
-  if (username !== process.env.ADMIN_USERNAME) {
+  if (email !== process.env.ADMIN_EMAIL) {
+    // Deliberately vague - don't reveal whether the email or password was
+    // the wrong part.
     return res.status(401).json({ error: 'Invalid credentials.' });
   }
 
   const passwordMatches = await bcrypt.compare(password, process.env.ADMIN_PASSWORD_HASH);
-
   if (!passwordMatches) {
     return res.status(401).json({ error: 'Invalid credentials.' });
   }
 
   const token = jwt.sign(
-    { username, role: 'admin' },
+    { email, role: 'admin' },
     process.env.JWT_SECRET,
-    { expiresIn: '8h' } // staff has to log in again after 8 hours
+    { expiresIn: '8h' }
   );
 
   return res.json({ token });

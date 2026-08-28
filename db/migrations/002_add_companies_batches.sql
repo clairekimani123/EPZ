@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS batches (
 );
 
 ALTER TABLE applicants
-  ADD COLUMN IF NOT EXISTS batch_id INT NULL,
+  ADD COLUMN batch_id INT NULL,
   ADD CONSTRAINT fk_applicants_batch FOREIGN KEY (batch_id)
     REFERENCES batches(id) ON DELETE SET NULL;
 

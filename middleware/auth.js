@@ -1,9 +1,9 @@
 import jwt from 'jsonwebtoken';
 
 // --------------------------------------------------------------------------
-// This is "the door with a lock". Any route that needs `requireAuth` in
-// front of it will only run if a valid token is present. Otherwise it stops
-// the request right here with a 401.
+// This is "the door with a lock" from the explanation above. Any route that
+// needs `requireAuth` in front of it will only run if a valid token is
+// present. Otherwise it stops the request right here with a 401.
 //
 // HOW LOGIN WORKS END TO END:
 //   1. Staff member POSTs username+password to /api/auth/login

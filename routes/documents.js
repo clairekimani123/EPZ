@@ -12,12 +12,15 @@ import { requireAuth } from '../middleware/auth.js';
 // served publicly (see index.js: we do not app.use(express.static(...))
 // on this folder, on purpose). The only way to get a file back out is
 // through the GET /:documentId/download route below, which requires a
-// valid login token.
+// valid login token. This is the difference between "private storage" and
+// "public storage" in practice: it's not about where bytes sit on disk,
+// it's about whether there's a public URL that serves them with no checks.
 // --------------------------------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.join(__dirname, '..', 'uploads');
 
+// Ensure the uploads folder exists the first time the server starts.
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -27,8 +30,9 @@ const ALLOWED_DOC_TYPES = ['id_copy', 'passport_photo', 'personal_accident_cover
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
-    // Never trust the original filename from the browser - generate our
-    // own safe name instead: applicantId-docType-timestamp.ext
+    // Never trust the original filename from the browser - someone could
+    // name a file "../../etc/passwd" to try to escape the folder. We
+    // generate our own safe name instead: applicantId-docType-timestamp.ext
     const ext = path.extname(file.originalname);
     const safeName = `${req.params.applicantId}-${req.body.docType}-${Date.now()}${ext}`;
     cb(null, safeName);
@@ -50,7 +54,9 @@ const upload = multer({
 const router = Router();
 
 // POST /api/applicants/:applicantId/documents
-// Public for now (applicant uploads their own docs right after applying).
+// Public for now (an applicant uploads their own docs right after applying,
+// no login required for them - they're not staff). docType comes from a
+// dropdown in the React form, validated server-side against the allow-list.
 router.post('/:applicantId/documents', upload.single('file'), async (req, res) => {
   const { applicantId } = req.params;
   const { docType } = req.body;
