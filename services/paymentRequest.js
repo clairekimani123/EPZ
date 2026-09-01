@@ -2,17 +2,19 @@ import { pool } from '../db/pool.js';
 import { initiateStkPush, normalizePhoneForMpesa } from './mpesa.js';
 
 // --------------------------------------------------------------------------
-// Shared by BOTH payment-trigger routes (staff-initiated in routes/payments.js,
-// and applicant-initiated in routes/applicants.js) so there is exactly ONE
-// place that actually talks to Safaricom. Two separate copies of this logic
-// would inevitably drift apart over time as one gets updated and the other
-// forgotten - a bug we've already run into more than once in this project
-// with duplicated header markup and duplicated doc-type lists.
+// Shared by both payment-trigger routes so there is exactly ONE place that
+// actually talks to Safaricom.
+//
+// Uses payer_phone if one has been recorded (someone other than the
+// applicant is paying - parent/guardian/friend), otherwise falls back to
+// the applicant's own phone_number. This is why the payment page collects
+// payer details FIRST (see routes/payments.js request-payment-public) and
+// stores them before calling this function.
 // --------------------------------------------------------------------------
 
 export async function sendPaymentRequestForApplicant(applicantId) {
   const [rows] = await pool.query(
-    `SELECT a.id, a.full_name, a.phone_number, b.fee_amount
+    `SELECT a.id, a.full_name, a.phone_number, a.payer_phone, b.fee_amount
      FROM applicants a
      LEFT JOIN batches b ON b.id = a.batch_id
      WHERE a.id = ?`,
@@ -27,12 +29,13 @@ export async function sendPaymentRequestForApplicant(applicantId) {
     return { ok: false, status: 400, error: "This applicant's batch has no fee set - nothing to charge." };
   }
 
-  const phone = normalizePhoneForMpesa(applicant.phone_number);
+  const targetRawPhone = applicant.payer_phone || applicant.phone_number;
+  const phone = normalizePhoneForMpesa(targetRawPhone);
   if (!phone) {
     return {
       ok: false,
       status: 400,
-      error: `Could not read "${applicant.phone_number}" as a valid Kenyan phone number.`,
+      error: `Could not read "${targetRawPhone}" as a valid Kenyan phone number.`,
     };
   }
 

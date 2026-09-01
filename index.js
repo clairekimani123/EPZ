@@ -3,6 +3,7 @@ import cors from 'cors';
 import 'dotenv/config';
 import applicantsRouter from './routes/applicants.js';
 import documentsRouter from './routes/documents.js';
+import paymentsRouter from './routes/payments.js';
 import authRouter from './routes/auth.js';
 import companiesRouter from './routes/companies.js';
 import batchesRouter from './routes/batches.js';
@@ -15,6 +16,7 @@ app.use(express.json());
 app.use('/api/auth', authRouter);
 app.use('/api/applicants', applicantsRouter);
 app.use('/api/applicants', documentsRouter);
+app.use('/api/applicants', paymentsRouter);
 app.use('/api/companies', companiesRouter);
 app.use('/api/batches', batchesRouter);
 
