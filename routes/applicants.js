@@ -24,6 +24,36 @@ function toSnakeCase(str) {
   return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
+// Shared by BOTH the paginated list (GET /) and the CSV export (GET
+// /export) - same lesson as elsewhere in this project: one place builds
+// the WHERE clause, so the two routes can never silently drift apart and
+// show different results for "the same" filters.
+function buildApplicantFilters(query) {
+  const { dateFrom, dateTo, location, phone, jobType } = query;
+  const conditions = [];
+  const params = [];
+  if (dateFrom) { conditions.push('a.created_at >= ?'); params.push(`${dateFrom} 00:00:00`); }
+  if (dateTo) { conditions.push('a.created_at <= ?'); params.push(`${dateTo} 23:59:59`); }
+  if (location) { conditions.push('a.location LIKE ?'); params.push(`%${location}%`); }
+  if (phone) { conditions.push('a.phone_number LIKE ?'); params.push(`%${phone}%`); }
+  if (jobType) { conditions.push('b.role LIKE ?'); params.push(`%${jobType}%`); }
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return { whereClause, params };
+}
+
+// CSV requires escaping any field that itself contains a comma, quote, or
+// newline - otherwise a location like "Nairobi, Kenya" would be
+// misinterpreted as TWO columns by Excel. The rule: if a value contains
+// any of those characters, wrap it in double quotes, and double up any
+// quote characters already inside it.
+function csvEscape(value) {
+  const str = value === null || value === undefined ? '' : String(value);
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
 router.post('/', async (req, res) => {
   const { fullName, phoneNumber, age, idNumber, location, hasExperience, experienceDetails, batchId } = req.body;
 
@@ -116,22 +146,13 @@ router.post('/', async (req, res) => {
 
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { dateFrom, dateTo, location, phone, jobType } = req.query;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = [20, 40, 60, 100].includes(parseInt(req.query.pageSize, 10))
       ? parseInt(req.query.pageSize, 10)
       : 20;
     const offset = (page - 1) * pageSize;
 
-    const conditions = [];
-    const params = [];
-    if (dateFrom) { conditions.push('a.created_at >= ?'); params.push(`${dateFrom} 00:00:00`); }
-    if (dateTo) { conditions.push('a.created_at <= ?'); params.push(`${dateTo} 23:59:59`); }
-    if (location) { conditions.push('a.location LIKE ?'); params.push(`%${location}%`); }
-    if (phone) { conditions.push('a.phone_number LIKE ?'); params.push(`%${phone}%`); }
-    if (jobType) { conditions.push('b.role LIKE ?'); params.push(`%${jobType}%`); }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { whereClause, params } = buildApplicantFilters(req.query);
 
     const [rows] = await pool.query(
       `SELECT
@@ -157,6 +178,71 @@ router.get('/', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Fetch error:', err);
     return res.status(500).json({ error: 'Failed to fetch applicants.' });
+  }
+});
+
+// Staff-only. Exports EVERY applicant matching the current filters as a
+// downloadable CSV - deliberately no pagination limit here, since the
+// whole point is "give me the full list to work with in Excel," not a
+// page of it. Uses the exact same filters as the list view, so "export
+// what I'm looking at" behaves the way an admin would expect.
+router.get('/export', requireAuth, async (req, res) => {
+  try {
+    const { whereClause, params } = buildApplicantFilters(req.query);
+
+    const [rows] = await pool.query(
+      `SELECT
+        a.id, a.full_name, a.phone_number, a.age, a.location, a.id_number,
+        a.has_experience, a.status, a.payment_status, a.payment_date, a.created_at,
+        b.role AS batch_role, b.application_type,
+        c.name AS company_name
+      FROM applicants a
+      LEFT JOIN batches b ON b.id = a.batch_id
+      LEFT JOIN companies c ON c.id = b.company_id
+      ${whereClause}
+      ORDER BY a.created_at DESC`,
+      params
+    );
+
+    const headers = [
+      'Ref #', 'Full Name', 'Phone', 'Age', 'Location', 'ID Number',
+      'Has Experience', 'Status', 'Payment Status', 'Payment Date',
+      'Applied Date', 'Company', 'Role', 'Type',
+    ];
+
+    // Build the CSV text line by line: header row, then one row per
+    // applicant, joining fields with commas and rows with newlines - that
+    // IS the entire CSV format, nothing more sophisticated than this.
+    const lines = [headers.map(csvEscape).join(',')];
+    for (const a of rows) {
+      lines.push([
+        a.id,
+        a.full_name,
+        a.phone_number,
+        a.age,
+        a.location,
+        a.id_number,
+        a.has_experience ? 'Yes' : 'No',
+        a.status,
+        a.payment_status,
+        a.payment_date ? new Date(a.payment_date).toLocaleDateString() : '',
+        new Date(a.created_at).toLocaleDateString(),
+        a.company_name || '',
+        a.batch_role || '',
+        a.application_type || '',
+      ].map(csvEscape).join(','));
+    }
+    const csv = lines.join('\n');
+
+    // These two headers are what make the browser treat this as a file
+    // download named applicants.csv, rather than trying to display raw
+    // text in the tab.
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="applicants.csv"');
+    return res.send(csv);
+  } catch (err) {
+    console.error('Export error:', err);
+    return res.status(500).json({ error: 'Failed to export applicants.' });
   }
 });
 
