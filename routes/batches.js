@@ -148,4 +148,52 @@ router.delete('/:id', requireAuth, async (req, res) => {
   return res.json({ success: true });
 });
 
+// --------------------------------------------------------------------------
+// NEW ROUTES ADDED FOR THE BATCH DETAILS PAGE
+// --------------------------------------------------------------------------
+
+// 2. GET applicants specific to a batch (for the table and CSV)
+router.get('/:id/applicants', requireAuth, async (req, res) => {
+  try {
+    const batchId = parseInt(req.params.id, 10);
+    if (isNaN(batchId)) {
+      return res.status(400).json({ error: 'Invalid batch ID.' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT id, full_name, phone_number, email, payment_status, created_at, status 
+       FROM applicants 
+       WHERE batch_id = ? AND status != 'rejected'
+       ORDER BY created_at DESC`,
+      [batchId]
+    );
+    res.json({ applicants: rows });
+  } catch (err) {
+    console.error('Fetch batch applicants error:', err);
+    res.status(500).json({ error: 'Failed to fetch batch applicants.' });
+  }
+});
+
+// 1. GET a single batch's details
+router.get('/:id', requireAuth, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT b.*, c.name AS company_name 
+       FROM batches b 
+       LEFT JOIN companies c ON c.id = b.company_id 
+       WHERE b.id = ?`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Batch not found.' });
+    
+    res.json({ batch: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch batch.' });
+  }
+});
+
+
+
+
 export default router;

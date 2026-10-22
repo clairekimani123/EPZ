@@ -66,6 +66,19 @@ router.post('/', async (req, res) => {
   if (!location || !location.trim()) errors.location = 'Location is required.';
   if (!batchId) errors.batchId = 'Please select which position you are applying for.';
 
+  // Server-side re-check of the bio-data-vs-declaration ID match. The
+  // client already checks this too, but never trust that alone - someone
+  // could bypass the React form entirely and POST directly to this
+  // endpoint with mismatched values.
+  const declarationIdNumber = req.body.declarationIdNumber;
+  if (declarationIdNumber !== undefined) {
+    if (!declarationIdNumber || !declarationIdNumber.trim()) {
+      errors.declarationIdNumber = 'Declaration ID number is required.';
+    } else if (idNumber && declarationIdNumber.trim() !== idNumber.trim()) {
+      errors.declarationIdNumber = 'Declaration ID number must match the Bio Data ID number.';
+    }
+  }
+
   if (Object.keys(errors).length > 0) {
     return res.status(400).json({ success: false, errors });
   }

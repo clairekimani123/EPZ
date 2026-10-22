@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { initiateStkPush, normalizePhoneForMpesa } from './mpesa.js';
+import { initiateStkPush, normalizePhoneForJenga } from './jenga.js';
 
 // --------------------------------------------------------------------------
 // Shared by both payment-trigger routes so there is exactly ONE place that
@@ -30,7 +30,7 @@ export async function sendPaymentRequestForApplicant(applicantId) {
   }
 
   const targetRawPhone = applicant.payer_phone || applicant.phone_number;
-  const phone = normalizePhoneForMpesa(targetRawPhone);
+  const phone = normalizePhoneForJenga(targetRawPhone);
   if (!phone) {
     return {
       ok: false,

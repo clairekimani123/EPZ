@@ -92,6 +92,47 @@ router.get('/:id/payment-status-public', async (req, res) => {
   return res.json({ paymentStatus: applicant.payment_status });
 });
 
+// Jenga's IPN callback. Their M-Pesa STK Push wraps Safaricom's own
+// callback shape, so this parsing logic is nearly identical to the old
+// Daraja version - just checking two possible nesting shapes (Jenga's
+// docs show the result nested one level deeper, under "data", in some
+// examples) since the exact real IPN payload structure should be
+// confirmed once you can see a real one land in your sandbox.
+router.post('/jenga/callback', async (req, res) => {
+  const callback = req.body?.Body?.stkCallback || req.body?.data?.Body?.stkCallback;
+  if (!callback) {
+    console.error('Unexpected Jenga callback shape:', JSON.stringify(req.body));
+    return res.status(200).json({ received: true });
+  }
+
+  const { CheckoutRequestID, ResultCode, CallbackMetadata } = callback;
+
+  const [rows] = await pool.query(
+    `SELECT id FROM applicants WHERE mpesa_checkout_request_id = ?`,
+    [CheckoutRequestID]
+  );
+  const applicant = rows[0];
+  if (!applicant) {
+    console.error('Jenga callback for unknown CheckoutRequestID:', CheckoutRequestID);
+    return res.status(200).json({ received: true });
+  }
+
+  if (ResultCode === 0) {
+    const items = CallbackMetadata?.Item || [];
+    const receipt = items.find((i) => i.Name === 'MpesaReceiptNumber')?.Value || null;
+    await pool.query(
+      `UPDATE applicants SET payment_status = 'completed', payment_date = NOW(), mpesa_receipt_number = ? WHERE id = ?`,
+      [receipt, applicant.id]
+    );
+  } else {
+    await pool.query(`UPDATE applicants SET payment_status = 'failed' WHERE id = ?`, [applicant.id]);
+  }
+
+  return res.status(200).json({ received: true });
+});
+
+// Kept for reference / fallback - the original Daraja sandbox callback
+// still works if you ever want to test against Safaricom directly again.
 router.post('/mpesa/callback', async (req, res) => {
   const callback = req.body?.Body?.stkCallback;
   if (!callback) {
