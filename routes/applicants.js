@@ -1,14 +1,11 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
-import { pool } from '../db/pool.js';
+import sql from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sendSms, statusChangeMessage } from '../services/sms.js';
 
 const router = Router();
 
-// Extra admission-form fields (trainee flow only - job applicants simply
-// won't send these, and they'll be stored as NULL, which is fine since
-// every one of these columns is nullable).
 const OPTIONAL_FIELDS = [
   'gender', 'email', 'postalAddress', 'currentResidence', 'countyOfResidence',
   'dateOfBirth', 'placeOfBirth', 'religion', 'nationality', 'referringAgent',
@@ -19,33 +16,29 @@ const OPTIONAL_FIELDS = [
   'declarationAccepted', 'declarationName', 'declarationIdNumber', 'declarationDate',
 ];
 
-// camelCase (JS convention) -> snake_case (DB column names)
 function toSnakeCase(str) {
   return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
-// Shared by BOTH the paginated list (GET /) and the CSV export (GET
-// /export) - same lesson as elsewhere in this project: one place builds
-// the WHERE clause, so the two routes can never silently drift apart and
-// show different results for "the same" filters.
 function buildApplicantFilters(query) {
   const { dateFrom, dateTo, location, phone, jobType } = query;
   const conditions = [];
-  const params = [];
-  if (dateFrom) { conditions.push('a.created_at >= ?'); params.push(`${dateFrom} 00:00:00`); }
-  if (dateTo) { conditions.push('a.created_at <= ?'); params.push(`${dateTo} 23:59:59`); }
-  if (location) { conditions.push('a.location LIKE ?'); params.push(`%${location}%`); }
-  if (phone) { conditions.push('a.phone_number LIKE ?'); params.push(`%${phone}%`); }
-  if (jobType) { conditions.push('b.role LIKE ?'); params.push(`%${jobType}%`); }
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  return { whereClause, params };
+  
+  if (dateFrom) { conditions.push(sql`a.created_at >= ${dateFrom + ' 00:00:00'}`); }
+  if (dateTo) { conditions.push(sql`a.created_at <= ${dateTo + ' 23:59:59'}`); }
+  if (location) { conditions.push(sql`a.location ILIKE ${'%' + location + '%'}`); } 
+  if (phone) { conditions.push(sql`a.phone_number LIKE ${'%' + phone + '%'}`); }
+  if (jobType) { conditions.push(sql`b.role ILIKE ${'%' + jobType + '%'}`); }
+  
+  // Combine conditions dynamically
+  let whereClause = sql``;
+  if (conditions.length > 0) {
+    whereClause = sql`WHERE ${conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`)}`;
+  }
+  
+  return { whereClause };
 }
 
-// CSV requires escaping any field that itself contains a comma, quote, or
-// newline - otherwise a location like "Nairobi, Kenya" would be
-// misinterpreted as TWO columns by Excel. The rule: if a value contains
-// any of those characters, wrap it in double quotes, and double up any
-// quote characters already inside it.
 function csvEscape(value) {
   const str = value === null || value === undefined ? '' : String(value);
   if (/[",\n]/.test(str)) {
@@ -66,10 +59,6 @@ router.post('/', async (req, res) => {
   if (!location || !location.trim()) errors.location = 'Location is required.';
   if (!batchId) errors.batchId = 'Please select which position you are applying for.';
 
-  // Server-side re-check of the bio-data-vs-declaration ID match. The
-  // client already checks this too, but never trust that alone - someone
-  // could bypass the React form entirely and POST directly to this
-  // endpoint with mismatched values.
   const declarationIdNumber = req.body.declarationIdNumber;
   if (declarationIdNumber !== undefined) {
     if (!declarationIdNumber || !declarationIdNumber.trim()) {
@@ -83,10 +72,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ success: false, errors });
   }
 
-  const [batchRows] = await pool.query(
-    `SELECT id, status, age_min, age_max FROM batches WHERE id = ?`,
-    [batchId]
-  );
+  const batchRows = await sql`SELECT id, status, age_min, age_max FROM batches WHERE id = ${batchId}`;
   const batch = batchRows[0];
 
   if (!batch) {
@@ -104,46 +90,33 @@ router.post('/', async (req, res) => {
 
   const applicationToken = crypto.randomBytes(20).toString('hex');
 
-  // Build the optional-fields part of the INSERT dynamically, so this
-  // route works for both the short Job form and the long Trainee admission
-  // form without needing two separate INSERT statements.
-  const optionalColumns = [];
-  const optionalPlaceholders = [];
-  const optionalValues = [];
+  const applicantData = {
+    full_name: fullName.trim(),
+    phone_number: phoneNumber.trim(),
+    age: ageNum,
+    id_number: idNumber.trim(),
+    location: location.trim(),
+    batch_id: batchId,
+    has_experience: Boolean(hasExperience),
+    experience_details: experienceDetails?.trim() || null,
+    application_token: applicationToken,
+  };
+
   for (const field of OPTIONAL_FIELDS) {
     if (req.body[field] !== undefined && req.body[field] !== '') {
-      optionalColumns.push(toSnakeCase(field));
-      optionalPlaceholders.push('?');
-      optionalValues.push(field === 'declarationAccepted' ? Boolean(req.body[field]) : req.body[field]);
+      applicantData[toSnakeCase(field)] = field === 'declarationAccepted' ? Boolean(req.body[field]) : req.body[field];
     }
   }
 
-  const baseColumns = ['full_name', 'phone_number', 'age', 'id_number', 'location', 'batch_id', 'has_experience', 'experience_details', 'application_token'];
-  const baseValues = [
-    fullName.trim(),
-    phoneNumber.trim(),
-    ageNum,
-    idNumber.trim(),
-    location.trim(),
-    batchId,
-    Boolean(hasExperience),
-    experienceDetails?.trim() || null,
-    applicationToken,
-  ];
-
-  const allColumns = [...baseColumns, ...optionalColumns];
-  const allPlaceholders = [...baseColumns.map(() => '?'), ...optionalPlaceholders];
-  const allValues = [...baseValues, ...optionalValues];
-
   try {
-    const [result] = await pool.query(
-      `INSERT INTO applicants (${allColumns.join(', ')}) VALUES (${allPlaceholders.join(', ')})`,
-      allValues
-    );
+    const result = await sql`
+      INSERT INTO applicants ${sql(applicantData)} 
+      RETURNING id
+    `;
 
-    return res.status(201).json({ success: true, referenceId: result.insertId, applicationToken });
+    return res.status(201).json({ success: true, referenceId: result[0].id, applicationToken });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
+    if (err.code === '23505') {
       return res.status(409).json({
         success: false,
         errors: { idNumber: 'An application with this ID number already exists.' },
@@ -165,10 +138,10 @@ router.get('/', requireAuth, async (req, res) => {
       : 20;
     const offset = (page - 1) * pageSize;
 
-    const { whereClause, params } = buildApplicantFilters(req.query);
+    const { whereClause } = buildApplicantFilters(req.query);
 
-    const [rows] = await pool.query(
-      `SELECT
+    const rows = await sql`
+      SELECT
         a.id, a.full_name, a.phone_number, a.age, a.location,
         a.has_experience, a.status, a.payment_status, a.payment_date, a.created_at,
         b.role AS batch_role, b.application_type,
@@ -178,33 +151,28 @@ router.get('/', requireAuth, async (req, res) => {
       LEFT JOIN companies c ON c.id = b.company_id
       ${whereClause}
       ORDER BY a.created_at DESC
-      LIMIT ? OFFSET ?`,
-      [...params, pageSize, offset]
-    );
+      LIMIT ${pageSize} OFFSET ${offset}
+    `;
 
-    const [countRows] = await pool.query(
-      `SELECT COUNT(*) AS total FROM applicants a LEFT JOIN batches b ON b.id = a.batch_id ${whereClause}`,
-      params
-    );
+    const countRows = await sql`
+      SELECT COUNT(*) AS total FROM applicants a LEFT JOIN batches b ON b.id = a.batch_id ${whereClause}
+    `;
 
-    return res.json({ applicants: rows, total: countRows[0].total, page, pageSize });
+    const total = parseInt(countRows[0].total, 10);
+
+    return res.json({ applicants: rows, total, page, pageSize });
   } catch (err) {
     console.error('Fetch error:', err);
     return res.status(500).json({ error: 'Failed to fetch applicants.' });
   }
 });
 
-// Staff-only. Exports EVERY applicant matching the current filters as a
-// downloadable CSV - deliberately no pagination limit here, since the
-// whole point is "give me the full list to work with in Excel," not a
-// page of it. Uses the exact same filters as the list view, so "export
-// what I'm looking at" behaves the way an admin would expect.
 router.get('/export', requireAuth, async (req, res) => {
   try {
-    const { whereClause, params } = buildApplicantFilters(req.query);
+    const { whereClause } = buildApplicantFilters(req.query);
 
-    const [rows] = await pool.query(
-      `SELECT
+    const rows = await sql`
+      SELECT
         a.id, a.full_name, a.phone_number, a.age, a.location, a.id_number,
         a.has_experience, a.status, a.payment_status, a.payment_date, a.created_at,
         b.role AS batch_role, b.application_type,
@@ -213,9 +181,8 @@ router.get('/export', requireAuth, async (req, res) => {
       LEFT JOIN batches b ON b.id = a.batch_id
       LEFT JOIN companies c ON c.id = b.company_id
       ${whereClause}
-      ORDER BY a.created_at DESC`,
-      params
-    );
+      ORDER BY a.created_at DESC
+    `;
 
     const headers = [
       'Ref #', 'Full Name', 'Phone', 'Age', 'Location', 'ID Number',
@@ -223,33 +190,18 @@ router.get('/export', requireAuth, async (req, res) => {
       'Applied Date', 'Company', 'Role', 'Type',
     ];
 
-    // Build the CSV text line by line: header row, then one row per
-    // applicant, joining fields with commas and rows with newlines - that
-    // IS the entire CSV format, nothing more sophisticated than this.
     const lines = [headers.map(csvEscape).join(',')];
     for (const a of rows) {
       lines.push([
-        a.id,
-        a.full_name,
-        a.phone_number,
-        a.age,
-        a.location,
-        a.id_number,
-        a.has_experience ? 'Yes' : 'No',
-        a.status,
-        a.payment_status,
+        a.id, a.full_name, a.phone_number, a.age, a.location, a.id_number,
+        a.has_experience ? 'Yes' : 'No', a.status, a.payment_status,
         a.payment_date ? new Date(a.payment_date).toLocaleDateString() : '',
         new Date(a.created_at).toLocaleDateString(),
-        a.company_name || '',
-        a.batch_role || '',
-        a.application_type || '',
+        a.company_name || '', a.batch_role || '', a.application_type || '',
       ].map(csvEscape).join(','));
     }
     const csv = lines.join('\n');
 
-    // These two headers are what make the browser treat this as a file
-    // download named applicants.csv, rather than trying to display raw
-    // text in the tab.
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="applicants.csv"');
     return res.send(csv);
@@ -267,13 +219,14 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
   }
 
-  const [applicantRows] = await pool.query(`SELECT id, full_name, phone_number FROM applicants WHERE id = ?`, [id]);
+  const applicantRows = await sql`SELECT id, full_name, phone_number FROM applicants WHERE id = ${id}`;
   const applicant = applicantRows[0];
   if (!applicant) {
     return res.status(404).json({ error: 'Applicant not found.' });
   }
 
-  await pool.query(`UPDATE applicants SET status = ? WHERE id = ?`, [status, id]);
+  await sql`UPDATE applicants SET status = ${status} WHERE id = ${id}`;
+  
   sendSms(applicant.phone_number, statusChangeMessage(applicant.full_name, status)).catch((err) =>
     console.error('SMS send failed:', err)
   );
@@ -288,24 +241,20 @@ router.patch('/:id/payment-status', requireAuth, async (req, res) => {
     return res.status(400).json({ error: `paymentStatus must be one of: ${VALID_PAYMENT_STATUSES.join(', ')}` });
   }
   const paymentDate = paymentStatus === 'completed' ? new Date() : null;
-  const [result] = await pool.query(
-    `UPDATE applicants SET payment_status = ?, payment_date = ? WHERE id = ?`,
-    [paymentStatus, paymentDate, id]
-  );
-  if (result.affectedRows === 0) {
+  
+  const result = await sql`
+    UPDATE applicants SET payment_status = ${paymentStatus}, payment_date = ${paymentDate} 
+    WHERE id = ${id} RETURNING id
+  `;
+  
+  if (result.length === 0) {
     return res.status(404).json({ error: 'Applicant not found.' });
   }
   return res.json({ success: true });
 });
 
-// Staff-only. Returns EVERY column for one applicant - the full admission
-// form (bio data, academic, guardian, next of kin, emergency contact,
-// declaration, payer info). Fetched lazily when an admin expands a row in
-// the dashboard, not included in the main list query, since the list
-// already returns many rows at once and most of these ~35 columns aren't
-// needed until someone actually wants to review one specific application.
 router.get('/:id/full', requireAuth, async (req, res) => {
-  const [rows] = await pool.query(`SELECT * FROM applicants WHERE id = ?`, [req.params.id]);
+  const rows = await sql`SELECT * FROM applicants WHERE id = ${req.params.id}`;
   const applicant = rows[0];
   if (!applicant) {
     return res.status(404).json({ error: 'Applicant not found.' });

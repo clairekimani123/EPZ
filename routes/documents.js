@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { pool } from '../db/pool.js';
+import sql from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -50,11 +50,10 @@ router.post('/:applicantId/documents', upload.single('file'), async (req, res) =
   }
 
   try {
-    await pool.query(
-      `INSERT INTO documents (applicant_id, doc_type, file_path, original_filename)
-       VALUES (?, ?, ?, ?)`,
-      [applicantId, docType, req.file.filename, req.file.originalname]
-    );
+    await sql`
+      INSERT INTO documents (applicant_id, doc_type, file_path, original_filename)
+      VALUES (${applicantId}, ${docType}, ${req.file.filename}, ${req.file.originalname})
+    `;
     return res.status(201).json({ success: true });
   } catch (err) {
     console.error('Document save error:', err);
@@ -63,18 +62,16 @@ router.post('/:applicantId/documents', upload.single('file'), async (req, res) =
 });
 
 router.get('/:applicantId/documents', requireAuth, async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT id, doc_type, original_filename, uploaded_at FROM documents WHERE applicant_id = ?`,
-    [req.params.applicantId]
-  );
+  const rows = await sql`
+    SELECT id, doc_type, original_filename, uploaded_at FROM documents WHERE applicant_id = ${req.params.applicantId}
+  `;
   return res.json({ documents: rows });
 });
 
 router.get('/:applicantId/documents/:documentId/download', requireAuth, async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT file_path, original_filename FROM documents WHERE id = ? AND applicant_id = ?`,
-    [req.params.documentId, req.params.applicantId]
-  );
+  const rows = await sql`
+    SELECT file_path, original_filename FROM documents WHERE id = ${req.params.documentId} AND applicant_id = ${req.params.applicantId}
+  `;
   const doc = rows[0];
   if (!doc) {
     return res.status(404).json({ error: 'Document not found.' });
