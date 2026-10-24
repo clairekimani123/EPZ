@@ -1,83 +1,78 @@
 import { Router } from 'express';
 import multer from 'multer';
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { createClient } from '@supabase/supabase-js';
+import ws from 'ws'; // ✅ Import ws
 import sql from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const uploadsDir = path.join(__dirname, '..', 'uploads');
-
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const ALLOWED_DOC_TYPES = ['id_copy', 'passport_photo', 'personal_accident_cover', 'signature'];
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.png';
-    const safeName = `${req.params.applicantId}-${req.body.docType}-${Date.now()}${ext}`;
-    cb(null, safeName);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowedMimes = ['image/jpeg', 'image/png', 'application/pdf'];
-    if (!allowedMimes.includes(file.mimetype)) {
-      return cb(new Error('Only JPG, PNG, or PDF files are allowed.'));
-    }
-    cb(null, true);
-  },
-});
-
 const router = Router();
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    realtime: { transport: ws } // ✅ Force WebSocket transport
+  }
+);
+
+// Change to memory storage, so we can get the file buffer
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 router.post('/:applicantId/documents', upload.single('file'), async (req, res) => {
   const { applicantId } = req.params;
   const { docType } = req.body;
+  const file = req.file;
 
-  if (!ALLOWED_DOC_TYPES.includes(docType)) {
-    return res.status(400).json({ error: `docType must be one of: ${ALLOWED_DOC_TYPES.join(', ')}` });
-  }
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file was uploaded.' });
+  if (!file) return res.status(400).json({ error: 'No file uploaded.' });
+
+  // Generate a unique file path
+  const fileExt = file.originalname.split('.').pop();
+  const fileName = `${applicantId}-${docType}-${Date.now()}.${fileExt}`;
+  const filePath = `PCLDocuments-docs/${fileName}`;
+
+  // Upload to Supabase Storage
+  const { error: uploadError } = await supabase.storage
+    .from('PCLDocuments-docs')
+    .upload(filePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (uploadError) {
+    console.error('Storage upload error:', uploadError);
+    return res.status(500).json({ error: 'Failed to upload file.' });
   }
 
-  try {
-    await sql`
-      INSERT INTO documents (applicant_id, doc_type, file_path, original_filename)
-      VALUES (${applicantId}, ${docType}, ${req.file.filename}, ${req.file.originalname})
-    `;
-    return res.status(201).json({ success: true });
-  } catch (err) {
-    console.error('Document save error:', err);
-    return res.status(500).json({ error: 'Failed to save document record.' });
-  }
-});
-
-router.get('/:applicantId/documents', requireAuth, async (req, res) => {
-  const rows = await sql`
-    SELECT id, doc_type, original_filename, uploaded_at FROM documents WHERE applicant_id = ${req.params.applicantId}
+  // Save the storage path to the database (not a local path)
+  await sql`
+    INSERT INTO documents (applicant_id, doc_type, file_path, original_filename)
+    VALUES (${applicantId}, ${docType}, ${filePath}, ${file.originalname})
   `;
-  return res.json({ documents: rows });
+
+  return res.status(201).json({ success: true });
 });
 
+// When downloading, generate a signed URL instead of reading from local disk
 router.get('/:applicantId/documents/:documentId/download', requireAuth, async (req, res) => {
   const rows = await sql`
-    SELECT file_path, original_filename FROM documents WHERE id = ${req.params.documentId} AND applicant_id = ${req.params.applicantId}
+    SELECT file_path, original_filename FROM documents 
+    WHERE id = ${req.params.documentId} AND applicant_id = ${req.params.applicantId}
   `;
   const doc = rows[0];
-  if (!doc) {
-    return res.status(404).json({ error: 'Document not found.' });
-  }
-  const filePath = path.join(uploadsDir, doc.file_path);
-  return res.download(filePath, doc.original_filename);
+  if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+  // Generate a signed URL valid for 60 seconds
+  const { data, error } = await supabase.storage
+    .from('PCLDocuments-docs')
+    .createSignedUrl(doc.file_path, 60);
+
+  if (error) return res.status(500).json({ error: 'Failed to generate download link.' });
+  
+  // Redirect directly to the signed URL
+  return res.redirect(data.signedUrl);
 });
 
 export default router;

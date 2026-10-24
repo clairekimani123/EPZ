@@ -1,4 +1,4 @@
-import { pool } from '../db/pool.js';
+// import { pool } from '../db/pool.js';
 import { initiateStkPush, normalizePhoneForJenga } from './jenga.js';
 
 // --------------------------------------------------------------------------

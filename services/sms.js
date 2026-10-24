@@ -1,31 +1,31 @@
-// --------------------------------------------------------------------------
-// This is deliberately built as a small, swappable interface: one function,
-// sendSms(phoneNumber, message). Right now it just logs to your terminal
-// instead of sending a real SMS, controlled by SMS_ENABLED in .env. When
-// you're ready to wire up a real provider (Africa's Talking, Twilio), you
-// only ever touch THIS file - nothing that calls sendSms() needs to change.
-// That's the "build vs buy" pattern from your original project spec in
-// practice: start with a stub, swap the implementation later without
-// rewriting the code that depends on it.
-// --------------------------------------------------------------------------
+import AfricasTalking from 'africastalking';
 
-const SMS_ENABLED = process.env.SMS_ENABLED === 'true';
+const credentials = {
+  apiKey: process.env.AT_API_KEY,
+  username: process.env.AT_USERNAME,
+};
+
+const africastalking = AfricasTalking(credentials);
+const sms = africastalking.SMS;
 
 export async function sendSms(phoneNumber, message) {
-  if (!SMS_ENABLED) {
-    console.log(`[SMS - not sent, SMS_ENABLED=false] to ${phoneNumber}: "${message}"`);
-    return { success: true, simulated: true };
+  try {
+    // Africa's Talking requires international format, e.g. +254712345678
+    const formattedPhone = phoneNumber.startsWith('0') 
+      ? `+254${phoneNumber.slice(1)}` 
+      : phoneNumber;
+
+    const result = await sms.send({
+      to: [formattedPhone],
+      message: message,
+      from: process.env.AT_SENDER_ID, // Optional
+    });
+    console.log('SMS sent:', result);
+    return result;
+  } catch (error) {
+    console.error('SMS error:', error);
+    throw error;
   }
-
-  // --- Real integration goes here once you're ready, e.g. Africa's Talking:
-  //
-  // import AfricasTalking from 'africastalking';
-  // const at = AfricasTalking({ apiKey: process.env.AT_API_KEY, username: process.env.AT_USERNAME });
-  // const result = await at.SMS.send({ to: [phoneNumber], message });
-  // return { success: true, result };
-
-  console.warn('SMS_ENABLED is true but no real provider is wired up yet in services/sms.js');
-  return { success: false, error: 'SMS provider not configured' };
 }
 
 // Small helper so status-change messages stay consistent and easy to edit
